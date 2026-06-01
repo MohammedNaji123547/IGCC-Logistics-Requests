@@ -743,11 +743,21 @@ function v4() {
 
 function getDailyRows() {
   return Array.from(document.querySelectorAll('[id^="daily-row-"]')).map(r=>{
-    const id=r.id.replace('daily-row-','');
+    const id  = r.id.replace('daily-row-','');
+    const s   = document.getElementById(`daily-start-${id}`)?.value||'';
+    const e   = document.getElementById(`daily-end-${id}`)?.value||'';
+    let regH=0, otH=0;
+    if (s && e) {
+      const [sh,sm]=s.split(':').map(Number),[eh,em]=e.split(':').map(Number);
+      const totalH = ((eh*60+em)-(sh*60+sm))/60;
+      regH = Math.min(totalH, REGULAR_HOURS);
+      otH  = Math.max(0, totalH - REGULAR_HOURS);
+    }
     return {
-      status:document.getElementById(`daily-status-${id}`)?.value||'',
-      start: document.getElementById(`daily-start-${id}`)?.value||'',
-      end:   document.getElementById(`daily-end-${id}`)?.value||'',
+      status:   document.getElementById(`daily-status-${id}`)?.value||'',
+      start: s, end: e,
+      regular:  regH>0?regH.toFixed(1):'0',
+      overtime: otH>0?otH.toFixed(1):'0',
     };
   });
 }
@@ -831,9 +841,13 @@ async function doStep3() {
   }));
   await save(sheetRows,'ivms');
   // Check if 1-day case → complete
-  const maxDur = Math.max(...caseData.step1.items.map(it=>
-    it.start&&it.end?Math.round((new Date(it.end)-new Date(it.start))/864e5):0));
-  if (maxDur<=1) {
+  // Duration 0 = same day, 1 = consecutive days — both treated as single-day cases
+  const maxDur = Math.max(...caseData.step1.items.map(it=> {
+    if (!it.start || !it.end) return 0;
+    const diffMs = new Date(it.end) - new Date(it.start);
+    return Math.round(diffMs / 864e5); // 0 = same day, 1 = next day, etc.
+  }));
+  if (maxDur <= 1) {  // same-day or 1-day apart closes after IVMS
     showSuccess('Case completed','1-day case — IVMS verification closes the case',3,[
       ['Case ID',caseId],['Verified by',caseData.step3.by],
       ['GPS status',caseData.step3.gps],['Status','Completed — 1 day']
@@ -860,7 +874,9 @@ async function doStep4() {
     'Make / Model':caseData.step2?.items?.[i]?.make||'',
     'Attendance Status':r.status,
     'Start Time':r.start||'—','End Time':r.end||'—',
-    'Working Hours':r.start&&r.end?calcH(r.start,r.end):'0',
+    'Regular Hours':  r.regular||'0',
+    'Overtime Hours': r.overtime||'0',
+    'Total Hours':    r.start&&r.end?calcH(r.start,r.end):'0',
     'Status':'Daily Log Recorded'
   }));
   await save(sheetRows,'daily');
@@ -1042,12 +1058,13 @@ function buildDailyTable() {
     <div class="daily-wrap">
       <table class="daily-table">
         <thead><tr>
-          <th style="width:18%">Equipment type</th>
-          <th style="width:16%">Plate</th>
-          <th style="width:15%">Status</th>
-          <th style="width:15%">Start time</th>
-          <th style="width:15%">End time</th>
-          <th style="width:12%">Hours</th>
+          <th style="width:16%">Equipment type</th>
+          <th style="width:13%">Plate</th>
+          <th style="width:12%">Status</th>
+          <th style="width:12%">Start time</th>
+          <th style="width:12%">End time</th>
+          <th style="width:10%">Reg. hours</th>
+          <th style="width:10%">Overtime</th>
           <th style="width:9%">CTR</th>
         </tr></thead>
         <tbody id="daily-body"></tbody>
@@ -1069,32 +1086,59 @@ function buildDailyTable() {
       </select></td>
       <td><input type="time" id="daily-start-${i}" oninput="calcDayH(${i});v4()" style="font-size:12px;"></td>
       <td><input type="time" id="daily-end-${i}" oninput="calcDayH(${i});v4()" style="font-size:12px;"></td>
-      <td><span id="daily-hrs-${i}" style="font-size:12px;color:var(--muted);font-family:var(--mono);">—</span></td>
+      <td><span id="daily-hrs-${i}" style="font-size:12px;color:var(--text);font-family:var(--mono);font-weight:500;">—</span></td>
+      <td><span id="daily-ot-${i}" style="font-size:12px;color:var(--warning);font-family:var(--mono);font-weight:600;">—</span></td>
       <td style="font-size:11px;font-family:var(--mono);color:var(--muted);">${it.ctr.length>15?it.ctr.slice(0,14)+'…':it.ctr}</td>`;
     tbody.appendChild(tr);
   });
 }
 
 function onDayStatus(i){
-  const s=document.getElementById(`daily-status-${i}`).value;
-  const isOff=s==='off'||s==='breakdown';
-  document.getElementById(`daily-start-${i}`).disabled=isOff;
-  document.getElementById(`daily-end-${i}`).disabled=isOff;
-  if(isOff){
-    document.getElementById(`daily-start-${i}`).value='';
-    document.getElementById(`daily-end-${i}`).value='';
-    document.getElementById(`daily-hrs-${i}`).textContent=s.toUpperCase();
+  const s     = document.getElementById(`daily-status-${i}`).value;
+  const isOff = s==='off'||s==='breakdown';
+  document.getElementById(`daily-start-${i}`).disabled = isOff;
+  document.getElementById(`daily-end-${i}`).disabled   = isOff;
+  const hrs = document.getElementById(`daily-hrs-${i}`);
+  const ot  = document.getElementById(`daily-ot-${i}`);
+  if (isOff) {
+    document.getElementById(`daily-start-${i}`).value = '';
+    document.getElementById(`daily-end-${i}`).value   = '';
+    if (hrs) { hrs.textContent = s.toUpperCase(); hrs.style.color='var(--muted)'; }
+    if (ot)  { ot.textContent  = '—'; }
+  } else {
+    if (hrs) hrs.textContent = '—';
+    if (ot)  ot.textContent  = '—';
   }
 }
 
+const REGULAR_HOURS = 10; // Standard working day
+
 function calcDayH(i){
-  const s=document.getElementById(`daily-start-${i}`)?.value;
-  const e=document.getElementById(`daily-end-${i}`)?.value;
-  const el=document.getElementById(`daily-hrs-${i}`);
-  if(s&&e){
-    const [sh,sm]=s.split(':').map(Number),[eh,em]=e.split(':').map(Number);
-    const d=(eh*60+em)-(sh*60+sm);
-    el.textContent=d>0?(d/60).toFixed(1)+' hrs':'—';
+  const s  = document.getElementById(`daily-start-${i}`)?.value;
+  const e  = document.getElementById(`daily-end-${i}`)?.value;
+  const hrs = document.getElementById(`daily-hrs-${i}`);
+  const ot  = document.getElementById(`daily-ot-${i}`);
+  if (!hrs) return;
+  if (s && e) {
+    const [sh,sm] = s.split(':').map(Number);
+    const [eh,em] = e.split(':').map(Number);
+    const totalMins = (eh*60+em) - (sh*60+sm);
+    if (totalMins <= 0) { hrs.textContent='—'; ot.textContent='—'; return; }
+    const totalHrs  = totalMins / 60;
+    const regHrs    = Math.min(totalHrs, REGULAR_HOURS);
+    const otHrs     = Math.max(0, totalHrs - REGULAR_HOURS);
+    hrs.textContent = regHrs.toFixed(1) + ' hrs';
+    hrs.style.color = 'var(--success)';
+    if (otHrs > 0) {
+      ot.textContent  = otHrs.toFixed(1) + ' hrs';
+      ot.style.color  = 'var(--warning)';
+    } else {
+      ot.textContent = '—';
+      ot.style.color = 'var(--muted)';
+    }
+  } else {
+    hrs.textContent = '—';
+    if (ot) ot.textContent = '—';
   }
 }
 
